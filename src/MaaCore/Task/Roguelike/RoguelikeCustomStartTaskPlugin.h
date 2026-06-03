@@ -10,6 +10,8 @@ enum class RoguelikeCustomType
     Reward,   // 奖励类型， like 热水壶, 演讲稿, etc
     Roles,    // 职业类型， like 先手必胜, 稳扎稳打, etc
     CoreChar, // 首选干员， 干员名
+    FirstFloorNodes, // 第一层节点检查，如地区委托
+    RestoreRetry, // 恢复 retry_times（用于地区委托检查后）
     // CoCoreChar,  // 次选干员， 干员名
 };
 
@@ -45,6 +47,9 @@ private:
     bool hijack_reward();
     bool hijack_roles();
     bool hijack_core_char();
+    bool hijack_first_floor_nodes();
+    bool restore_retry();
+    virtual void reset_in_run_variables() override;
     std::vector<std::string> get_select_list() const;
 
 private:
@@ -54,5 +59,8 @@ private:
 
     std::string m_squad;
     std::string m_collectible_mode_squad;
+
+    bool m_need_check_first_floor = false;
+    bool m_need_restore_retry = false;
 };
 }

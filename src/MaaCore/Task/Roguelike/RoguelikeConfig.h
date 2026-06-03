@@ -142,6 +142,11 @@ public:
 
     bool get_collectible_mode_shopping() const { return m_collectible_mode_shopping; }
 
+    // ------------------ 第一层节点检查 ------------------
+    void set_check_regional_commissions(bool value) { m_check_regional_commissions = value; }
+
+    bool get_check_regional_commissions() const { return m_check_regional_commissions; }
+
     // ------------------ 刷常乐节点模式 ------------------
     void set_find_playTime_target(int target) { m_find_playTime_target = target; }
 
@@ -165,6 +170,9 @@ private:
     // ------------------ 刷开局模式 ------------------
     bool m_collectible_mode_shopping = false; // 刷开局模式下进入商店时购物
 
+
+    // ------------------ 第一层节点检查 ------------------
+    bool m_check_regional_commissions = false; // 刷开局模式下检查第一层是否有地区委托
     // ------------------ 刷常乐节点模式 ------------------
     int m_find_playTime_target = 0; // 目标常乐节点子类型 (1=令, 2=黍, 3=年)
 

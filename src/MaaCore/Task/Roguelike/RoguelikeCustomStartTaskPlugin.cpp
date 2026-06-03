@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include "RoguelikeCustomStartTaskPlugin.h"
 
 #include "Config/GeneralConfig.h"
@@ -8,6 +9,7 @@
 #include "Utils/Logger.hpp"
 #include "Vision/Miscellaneous/PipelineAnalyzer.h"
 #include "Vision/OCRer.h"
+#include "Vision/MultiMatcher.h"
 
 bool asst::RoguelikeCustomStartTaskPlugin::verify(AsstMsg msg, const json::value& details) const
 {
@@ -26,11 +28,13 @@ bool asst::RoguelikeCustomStartTaskPlugin::verify(AsstMsg msg, const json::value
     if (task_view.starts_with(roguelike_name)) {
         task_view.remove_prefix(roguelike_name.length());
     }
-    static const std::array<std::tuple<AsstMsg, std::string_view, RoguelikeCustomType>, 4> TaskMap = {
+    static const std::array<std::tuple<AsstMsg, std::string_view, RoguelikeCustomType>, 6> TaskMap = {
         std::make_tuple(AsstMsg::SubTaskCompleted, "Roguelike@Squad-EnterPoint", RoguelikeCustomType::Squad),
         std::make_tuple(AsstMsg::SubTaskStart, "Roguelike@LastReward-EnterPoint", RoguelikeCustomType::Reward),
         std::make_tuple(AsstMsg::SubTaskCompleted, "Roguelike@RolesDefault", RoguelikeCustomType::Roles),
         std::make_tuple(AsstMsg::SubTaskStart, "Roguelike@RecruitMain", RoguelikeCustomType::CoreChar),
+        std::make_tuple(AsstMsg::SubTaskStart, "Roguelike@Stages", RoguelikeCustomType::FirstFloorNodes),
+        std::make_tuple(AsstMsg::SubTaskStart, "Roguelike@ExitThenAbandon", RoguelikeCustomType::RestoreRetry),
     };
 
     m_waiting_to_run = RoguelikeCustomType::None;
@@ -56,6 +60,12 @@ bool asst::RoguelikeCustomStartTaskPlugin::verify(AsstMsg msg, const json::value
     }
     if (m_waiting_to_run == RoguelikeCustomType::CoreChar) {
         return !m_config->get_core_char().empty();
+    }
+    if (m_waiting_to_run == RoguelikeCustomType::FirstFloorNodes) {
+        return m_need_check_first_floor;
+    }
+    if (m_waiting_to_run == RoguelikeCustomType::RestoreRetry) {
+        return m_need_restore_retry;
     }
 
     // Roles CoreChar
@@ -116,6 +126,8 @@ bool asst::RoguelikeCustomStartTaskPlugin::_run()
         { RoguelikeCustomType::Reward, std::bind(&RoguelikeCustomStartTaskPlugin::hijack_reward, this) },
         { RoguelikeCustomType::Roles, std::bind(&RoguelikeCustomStartTaskPlugin::hijack_roles, this) },
         { RoguelikeCustomType::CoreChar, std::bind(&RoguelikeCustomStartTaskPlugin::hijack_core_char, this) },
+        { RoguelikeCustomType::FirstFloorNodes, std::bind(&RoguelikeCustomStartTaskPlugin::hijack_first_floor_nodes, this) },
+        { RoguelikeCustomType::RestoreRetry, std::bind(&RoguelikeCustomStartTaskPlugin::restore_retry, this) },
     };
 
     auto it = TypeActuator.find(m_waiting_to_run);
@@ -262,6 +274,139 @@ bool asst::RoguelikeCustomStartTaskPlugin::hijack_core_char()
     }
     return false; // 进入选择干员界面失败
 }
+
+
+bool asst::RoguelikeCustomStartTaskPlugin::restore_retry()
+{
+    Log.info("Restoring retry_times to default (20) for subsequent pipeline tasks");
+    m_need_restore_retry = false;
+    m_task_ptr->set_retry_times(RetryTimesDefault);
+    return true;
+}
+
+void asst::RoguelikeCustomStartTaskPlugin::reset_in_run_variables()
+{
+    m_need_check_first_floor = m_config->get_check_regional_commissions();
+    m_need_restore_retry = false;
+}
+
+bool asst::RoguelikeCustomStartTaskPlugin::hijack_first_floor_nodes()
+{
+    LogTraceFunction;
+
+    m_need_check_first_floor = false;
+
+    const std::string& theme = m_config->get_theme();
+
+    // Map template names to Chinese display names
+    static const std::unordered_map<std::string, std::string> NodeNameMap = {
+        { "Mizuki@Roguelike@StageRegionalCommissioning", "地区委托" },
+        { "Mizuki@Roguelike@StageCombatOps", "作战" },
+        { "Mizuki@Roguelike@StageEmergencyOps", "紧急作战" },
+        { "Mizuki@Roguelike@StageEncounter", "不期而遇" },
+        { "Mizuki@Roguelike@StageTrader", "诡意行商" },
+        { "Mizuki@Roguelike@StageSafeHouse", "安全屋" },
+        { "Mizuki@Roguelike@StageBoons", "得偿所愿" },
+        { "Mizuki@Roguelike@StageDreadfulFoe", "险路恶敌" },
+        { "Mizuki@Roguelike@StageDreadfulFoe-5", "险路恶敌" },
+        { "Mizuki@Roguelike@StageGambling", "赌局" },
+        { "Mizuki@Roguelike@StageWindAndRain", "失与得" },
+        { "Mizuki@Roguelike@StageEmergencyTransportation", "先行一步" },
+    };
+
+    bool found_target = false;
+    json::array nodes_display;
+    std::unordered_set<std::string> seen_names; // dedup across columns
+
+    // After entering floor 1, view starts at leftmost (start node position).
+    // Swipe right column-by-column to scan all nodes on floor 1 (up to 3 node columns + boss).
+    Log.info("Starting floor 1 node scan");
+
+    auto image = ctrler()->get_image();
+    MultiMatcher analyzer(image);
+    analyzer.set_task_info(theme + "@RoguelikeRoutingNodeAnalyze-RegionalCommissions");
+
+    // Scan up to 5 columns (first floor has up to 3-4 columns + boss, with some overlap)
+    int empty_cols = 0;
+    for (int col = 0; col < 5 && !found_target && empty_cols < 2; ++col) {
+        if (col > 0) {
+            ProcessTask(*this, { "RoguelikeRouting-MoveRight" }).run();
+            sleep(200);
+            image = ctrler()->get_image();
+            analyzer.set_image(image);
+        }
+
+        auto results_opt = analyzer.analyze();
+        int col_hits = 0;
+        if (results_opt) {
+            for (const auto& [rect, score, templ_name] : *results_opt) {
+                std::string name_no_png = templ_name;
+                if (name_no_png.ends_with(".png")) {
+                    name_no_png.resize(name_no_png.size() - 4);
+                }
+                auto it = NodeNameMap.find(name_no_png);
+                std::string display_name = it != NodeNameMap.end() ? it->second : name_no_png;
+
+                // Dedup by display name
+                if (seen_names.insert(display_name).second) {
+                    nodes_display.emplace_back(display_name);
+                    ++col_hits;
+                }
+
+                if (display_name == "地区委托") {
+                    found_target = true;
+                    break;
+                }
+            }
+        }
+
+        Log.info("Column", col, "scan:", col_hits, "new nodes found, total unique:", seen_names.size());
+
+        if (col_hits == 0) {
+            ++empty_cols;
+        }
+        else {
+            empty_cols = 0;
+        }
+    }
+
+    // Report results to GUI info bar (human-readable Chinese)
+    std::string summary = "第一层节点: ";
+    if (nodes_display.empty()) {
+        summary += "未识别到任何节点";
+    }
+    else {
+        for (size_t i = 0; i < nodes_display.size(); ++i) {
+            if (i > 0) summary += "、";
+            summary += nodes_display[i].as_string();
+        }
+    }
+    json::value info = json::object {
+        { "what", "FirstFloorNodeCheck" },
+        { "details",
+          json::object {
+              { "summary", summary },
+              { "found_target", found_target },
+          } },
+    };
+    callback(AsstMsg::ConnectionInfo, info);
+
+    if (found_target) {
+        Log.info("RegionalCommissions node FOUND, stopping task immediately (no exit/return).");
+        m_task_ptr->set_enable(false);
+    }
+    else {
+        Log.info("RegionalCommissions node NOT found, setting retry_times=0 to force onErrorNext -> ExitThenAbandon");
+        // Stages has onErrorNext: ["Mizuki@Roguelike@ExitThenAbandon"], reducing retry to 0
+        // makes the template-matching loop fail immediately after 1 attempt (~0.5s instead of ~11s).
+        // retry_times will be restored when ExitThenAbandon starts (via RestoreRetry hook).
+        m_need_restore_retry = true;
+        m_task_ptr->set_retry_times(0);
+    }
+
+    return true;
+}
+
 
 std::vector<std::string> asst::RoguelikeCustomStartTaskPlugin::get_select_list() const
 {

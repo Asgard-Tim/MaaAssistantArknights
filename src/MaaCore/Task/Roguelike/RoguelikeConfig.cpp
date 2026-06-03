@@ -30,6 +30,10 @@ bool asst::RoguelikeConfig::verify_and_load_params(const json::value& params)
         if (m_theme == RoguelikeTheme::Sami) {
             m_first_floor_foldartal = !params.get("first_floor_foldartal", "").empty();
         }
+
+        if (m_theme == RoguelikeTheme::Mizuki) {
+            m_check_regional_commissions = params.get("check_regional_commissions", false);
+        }
     }
 
     m_start_with_elite_two = params.get("start_with_elite_two", false);
